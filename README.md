@@ -12,6 +12,7 @@ It is **metadata only** – `getStream` always returns an empty list.
 - **Search:** movies, TV and anime in one search (people are filtered out)
 - **Details:** backdrop, poster, logo, synopsis, rating, cast, genres, year/runtime, trailer, IMDb + TMDB ids
 - **Seasons & episodes:** every season (incl. Specials) with episode titles, descriptions and stills
+- **Skip intro / recap / credits:** timestamps from [TheIntroDB](https://theintrodb.org) (matched by TMDB id) are attached to every aired episode and to movies, so the app's skip button works. Coverage is community-sourced, so some titles have none.
 
 ## Setup
 
@@ -30,6 +31,7 @@ Extensions/Providers and enter your GitHub username (or the full repo URL if you
 | Metadata Language | Language of titles / overviews (falls back to English when a translation is missing) |
 | Region | Country code for release dates and Now Playing / Upcoming |
 | Include adult content | Off by default |
+| Skip intro / outro timings | On by default. Turn off to avoid the extra per-episode lookups |
 | TMDB API Key | Optional override of the built-in key (`providers/tmdb/api.ts`) |
 
 ## Layout
@@ -41,6 +43,7 @@ providers/tmdb/
   posts.ts      getPosts / getSearchPosts
   meta.ts       getMeta   (links look like "movie/603" or "tv/1399")
   episodes.ts   getEpisodes (url looks like "tv/1399/season/1")
+  skips.ts      TheIntroDB lookups (intro / recap / credits timestamps)
   stream.ts     returns []
   settings.ts   settings UI
 ```

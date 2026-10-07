@@ -8,6 +8,7 @@ import {
   parseLink,
   tmdbGet,
 } from "./api";
+import { getSkipIntervals } from "./skips";
 
 function formatRuntime(minutes?: number): string {
   if (!minutes || minutes <= 0) return "";
@@ -124,10 +125,19 @@ export const getMeta = async function ({
     const linkList: Link[] = [];
 
     if (isMovie) {
+      const skip = settings.skipTimings
+        ? await getSkipIntervals(providerContext, id, undefined, undefined, data.runtime)
+        : [];
+
       linkList.push({
         title,
         directLinks: [
-          { title: "Movie", link: makeLink("movie", id), type: "movie" },
+          {
+            title: "Movie",
+            link: makeLink("movie", id),
+            type: "movie",
+            ...(skip.length ? { skip } : {}),
+          },
         ],
       });
     } else {

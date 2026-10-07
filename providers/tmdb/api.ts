@@ -17,6 +17,7 @@ export interface TmdbSettings {
   language: string;
   region: string;
   includeAdult: boolean;
+  skipTimings: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,10 @@ export async function getSettings(
     providerContext,
     "includeAdult",
   );
+  const skipTimings = await readSetting<boolean>(
+    providerContext,
+    "skipTimings",
+  );
 
   const cleanRegion = (region || "").trim().toUpperCase();
 
@@ -56,6 +61,7 @@ export async function getSettings(
       : DEFAULT_LANGUAGE,
     region: /^[A-Z]{2}$/.test(cleanRegion) ? cleanRegion : "",
     includeAdult: includeAdult === true,
+    skipTimings: skipTimings !== false, // on by default
   };
 }
 

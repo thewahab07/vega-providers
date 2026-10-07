@@ -1,6 +1,11 @@
 import { EpisodeLink, ProviderContext } from "../types";
 import { throwProviderError } from "../providerErrors";
-import { PROVIDER_NAME, imageUrl, tmdbGet } from "./api";
+import { PROVIDER_NAME, getSettings, imageUrl, tmdbGet } from "./api";
+import { getSkipIntervals, mapInBatches } from "./skips";
+
+// Each episode needs one TheIntroDB request, so cap very long seasons.
+const MAX_SKIP_LOOKUPS = 100;
+const SKIP_BATCH_SIZE = 8;
 
 export const getEpisodes = async function ({
   url,
@@ -24,8 +29,9 @@ export const getEpisodes = async function ({
     );
 
     const today = new Date().toISOString().slice(0, 10);
+    const settings = await getSettings(providerContext);
 
-    return (data.episodes || []).map((episode: any): EpisodeLink => {
+    const episodes: EpisodeLink[] = (data.episodes || []).map((episode: any): EpisodeLink => {
       const number = episode.episode_number;
       const name: string = (episode.name || "").trim();
       const isGenericName =
@@ -54,6 +60,37 @@ export const getEpisodes = async function ({
 
       return result;
     });
+
+    if (settings.skipTimings) {
+      // Only aired episodes can have timings.
+      const airedNumbers = (data.episodes || [])
+        .filter((e: any) => !e.air_date || e.air_date <= today)
+        .slice(0, MAX_SKIP_LOOKUPS);
+
+      const skips = await mapInBatches(
+        airedNumbers,
+        SKIP_BATCH_SIZE,
+        (e: any) =>
+          getSkipIntervals(
+            providerContext,
+            showId,
+            seasonNumber,
+            e.episode_number,
+            e.runtime,
+          ),
+      );
+
+      airedNumbers.forEach((e: any, index: number) => {
+        const target = episodes.find(
+          (ep) =>
+            ep.link ===
+            `tv/${showId}/season/${seasonNumber}/episode/${e.episode_number}`,
+        );
+        if (target && skips[index].length) target.skip = skips[index];
+      });
+    }
+
+    return episodes;
   } catch (error) {
     throwProviderError(PROVIDER_NAME, "getEpisodes", error);
   }

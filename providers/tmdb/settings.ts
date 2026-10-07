@@ -45,6 +45,14 @@ export const getSettingsSchema = async function ({
       defaultValue: false,
     },
     {
+      key: "skipTimings",
+      type: "toggle",
+      label: "Skip intro / outro timings",
+      description:
+        "Fetch intro, recap and credits timestamps from TheIntroDB so the player can show a skip button. Turn off if episode lists load slowly.",
+      defaultValue: true,
+    },
+    {
       key: "apiKey",
       type: "text",
       label: "TMDB API Key (optional)",
