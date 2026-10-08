@@ -284,13 +284,47 @@ async function extractHubCloud(
   const withQuality = (server: string) =>
     qualityLabelText ? `${server} (${qualityLabelText})` : server;
   const quality = qualityLabelText?.match(/\b(360|480|720|1080|2160)p\b/i)?.[1];
-  $$(".btn-success.btn-lg.h6,.btn-danger,.btn-secondary").each((_index, element) => {
+  const linkElements = $$(".btn-success.btn-lg.h6,.btn-danger,.btn-secondary").toArray();
+  for (const element of linkElements) {
     const href = $$(element).attr("href") || "";
-    if (!href) return;
+    if (!href) continue;
     if (href.includes("pixeldrain")) {
       streams.push({
         server: withQuality("Pixeldrain"),
         link: normalizePixeldrainUrl(href, html, String(cloud.data)),
+        type: "mkv",
+        ...(quality ? { quality } : {}),
+      });
+    } else if (
+      href.includes("hubcloud") ||
+      href.includes("/?id=") ||
+      href.includes("greenmotors")
+    ) {
+      let direct = href;
+      try {
+        const redirected = await axios.get(href, {
+          headers,
+          signal,
+          maxRedirects: 0,
+          validateStatus: (status: number) => status >= 200 && status < 400,
+        });
+        direct = redirected.headers?.location || direct;
+        if (direct.includes("?link=")) {
+          direct = direct.split("?link=")[1] || direct;
+        }
+      } catch {
+        // Keep the redirect URL when the host does not expose Location.
+      }
+      streams.push({
+        server: withQuality("GDrive (download only)"),
+        link: direct,
+        type: "mkv",
+        ...(quality ? { quality } : {}),
+      });
+    } else if (href.includes(".dev") && !href.includes("/?id=")) {
+      streams.push({
+        server: withQuality("CF Worker"),
+        link: href,
         type: "mkv",
         ...(quality ? { quality } : {}),
       });
@@ -305,7 +339,7 @@ async function extractHubCloud(
     } else if (href.includes(".mkv") || href.includes("?token=")) {
       streams.push({ server: withQuality("CF Worker"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     }
-  });
+  }
   return streams;
 }
 
