@@ -11,7 +11,7 @@ type Media = {
 };
 
 type DownloadVariant = {
-  link: string;
+  links: string[];
   label: string;
 };
 
@@ -144,13 +144,20 @@ async function findDownloadLinks(
         const groupTitle =
           $(element).closest(".season-item").find(".episode-title").text() ||
           $(element).find(".episode-file-title").text();
-        const link =
-          $(element).find("a:contains('HubCloud')").attr("href") ||
-          $(element).find("a").first().attr("href") ||
-          "";
-        if (link) {
+        const links = $(element)
+          .find("a")
+          .map((_index, anchor) => {
+            const href = $(anchor).attr("href") || "";
+            const text = $(anchor).text().toLowerCase();
+            return href && (text.includes("hubcloud") || text.includes("hubdrive"))
+              ? href
+              : "";
+          })
+          .get()
+          .filter(Boolean);
+        if (links.length) {
           matches.push({
-            link,
+            links,
             label: qualityLabel(groupTitle, media.title),
           });
         }
@@ -162,13 +169,20 @@ async function findDownloadLinks(
 
   const matches: DownloadVariant[] = [];
   $(".download-item").each((_index, element) => {
-    const link =
-      $(element).find("a:contains('HubCloud')").attr("href") ||
-      $(element).find("a").first().attr("href") ||
-      "";
-    if (link) {
+    const links = $(element)
+      .find("a")
+      .map((_index, anchor) => {
+        const href = $(anchor).attr("href") || "";
+        const text = $(anchor).text().toLowerCase();
+        return href && (text.includes("hubcloud") || text.includes("hubdrive"))
+          ? href
+          : "";
+      })
+      .get()
+      .filter(Boolean);
+    if (links.length) {
       matches.push({
-        link,
+        links,
         label: qualityLabel(
           $(element).find(".flex-1.text-left.font-semibold").text(),
           media.title,
@@ -289,27 +303,49 @@ export const getStream = async function ({
     const variants = await findDownloadLinks(page, media, providerContext, signal);
     const results = await Promise.allSettled(
       variants.map(async (variant) => {
-        const resolved = await redirect4khdhub(
-          variant.link,
-          providerContext,
-          signal,
-        );
-        if (resolved.includes("hubcloud") || resolved.includes("/drive/")) {
-          return extractHubCloud(resolved, providerContext, signal, variant.label);
-        }
+        let lastError: unknown;
+        for (const source of variant.links) {
+          try {
+            const resolved = await redirect4khdhub(
+              source,
+              providerContext,
+              signal,
+            );
+            if (resolved.includes("hubcloud") || resolved.includes("/drive/")) {
+              const streams = await extractHubCloud(
+                resolved,
+                providerContext,
+                signal,
+                variant.label,
+              );
+              if (streams.length) return streams;
+              throw new Error("HubCloud returned no streams");
+            }
 
-        const response = await providerContext.axios.get(resolved, {
-          headers: providerContext.commonHeaders,
-          signal,
-        });
-        const html = String(response.data);
-        const $ = providerContext.cheerio.load(html);
-        const hubLink =
-          $('h3:contains("1080p") a').attr("href") ||
-          html.match(/href="(https:\/\/hubcloud\.[^"]+\/drive\/[^"]+)"/)?.[1] ||
-          "";
-        if (!hubLink) throw new Error("4KHDHub did not return a HubCloud link");
-        return extractHubCloud(hubLink, providerContext, signal, variant.label);
+            const response = await providerContext.axios.get(resolved, {
+              headers: providerContext.commonHeaders,
+              signal,
+            });
+            const html = String(response.data);
+            const $ = providerContext.cheerio.load(html);
+            const hubLink =
+              $('h3:contains("1080p") a').attr("href") ||
+              html.match(/href="(https:\/\/hubcloud\.[^"]+\/drive\/[^"]+)"/)?.[1] ||
+              "";
+            if (!hubLink) throw new Error("4KHDHub did not return a HubCloud link");
+            const streams = await extractHubCloud(
+              hubLink,
+              providerContext,
+              signal,
+              variant.label,
+            );
+            if (streams.length) return streams;
+            throw new Error("HubCloud returned no streams");
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        throw lastError || new Error("No links for 4KHDHub variant");
       }),
     );
     const streams = results
@@ -321,7 +357,11 @@ export const getStream = async function ({
     if (streams.length) {
       return streams.filter(
         (stream, index, all) =>
-          all.findIndex((candidate) => candidate.link === stream.link) === index,
+          all.findIndex(
+            (candidate) =>
+              candidate.link === stream.link &&
+              candidate.server === stream.server,
+          ) === index,
       );
     }
     const failure = results.find(
