@@ -26,13 +26,13 @@ Extensions/Providers and enter your GitHub username (or the full repo URL if you
 
 ## Settings (in the app)
 
-| Setting | Purpose |
-| --- | --- |
-| Metadata Language | Language of titles / overviews (falls back to English when a translation is missing) |
-| Region | Country code for release dates and Now Playing / Upcoming |
-| Include adult content | Off by default |
-| Skip intro / outro timings | On by default. Turn off to avoid the extra per-episode lookups |
-| TMDB API Key | Optional override of the built-in key (`providers/tmdb/api.ts`) |
+| Setting                    | Purpose                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------------ |
+| Metadata Language          | Language of titles / overviews (falls back to English when a translation is missing) |
+| Region                     | Country code for release dates and Now Playing / Upcoming                            |
+| Include adult content      | Off by default                                                                       |
+| Skip intro / outro timings | On by default. Turn off to avoid the extra per-episode lookups                       |
+| TMDB API Key               | Optional override of the built-in key (`providers/tmdb/api.ts`)                      |
 
 ## Layout
 
@@ -57,3 +57,18 @@ To add a row, add `{ title, filter }` to `catalog.ts`. Filters can use the token
 npm run test:provider -- tmdb getPosts --rebuild   # single function
 npm run auto                                       # dev server for testing in the app
 ```
+
+## Icon
+
+`assets/tmdb.png` is the provider icon. The app loads the icon from a URL in `manifest.json`, so after pushing to GitHub set:
+
+```json
+"icon": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/assets/tmdb.png"
+```
+
+The bundled icon is a simple placeholder. You can replace it with the official logo from
+https://www.themoviedb.org/about/logos-attribution (keep it a PNG, the app can't draw SVGs in every screen).
+
+## Attribution
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
