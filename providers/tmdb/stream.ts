@@ -10,6 +10,11 @@ type Media = {
   episode?: number;
 };
 
+type DownloadVariant = {
+  link: string;
+  label: string;
+};
+
 const cleanTitle = (value: string) =>
   value
     .toLowerCase()
@@ -104,12 +109,24 @@ async function find4khdhubPage(
   return exact || fallback;
 }
 
-async function findDownloadLink(
+function qualityLabel(raw: string, mediaTitle: string): string {
+  const firstLine = raw.replace(/\s+/g, " ").trim().split("\n")[0].trim();
+  const inParentheses = firstLine.match(/\(([^()]*)\)/)?.[1];
+  const label = inParentheses || firstLine;
+  return label
+    .replace(new RegExp(`^${cleanTitle(mediaTitle)}\\s*`, "i"), "")
+    .replace(/^S\d+\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+async function findDownloadLinks(
   pageUrl: string,
   media: Media,
   providerContext: ProviderContext,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<DownloadVariant[]> {
   const response = await providerContext.axios.get(pageUrl, {
     headers: providerContext.commonHeaders,
     signal,
@@ -120,30 +137,47 @@ async function findDownloadLink(
     const wanted = `S${String(media.season).padStart(2, "0")}E${String(
       media.episode,
     ).padStart(2, "0")}`;
-    let match = "";
+    const matches: DownloadVariant[] = [];
     $(".episode-download-item").each((_index, element) => {
       const title = $(element).find(".episode-file-title").text().toUpperCase();
-      if (title.includes(wanted) && !match) {
-        match =
+      if (title.includes(wanted)) {
+        const groupTitle =
+          $(element).closest(".season-item").find(".episode-title").text() ||
+          $(element).find(".episode-file-title").text();
+        const link =
           $(element).find("a:contains('HubCloud')").attr("href") ||
           $(element).find("a").first().attr("href") ||
           "";
+        if (link) {
+          matches.push({
+            link,
+            label: qualityLabel(groupTitle, media.title),
+          });
+        }
       }
     });
-    if (!match) throw new Error(`4KHDHub episode not found: ${wanted}`);
-    return match;
+    if (!matches.length) throw new Error(`4KHDHub episode not found: ${wanted}`);
+    return matches;
   }
 
-  let match = "";
+  const matches: DownloadVariant[] = [];
   $(".download-item").each((_index, element) => {
-    if (match) return;
-    match =
+    const link =
       $(element).find("a:contains('HubCloud')").attr("href") ||
       $(element).find("a").first().attr("href") ||
       "";
+    if (link) {
+      matches.push({
+        link,
+        label: qualityLabel(
+          $(element).find(".flex-1.text-left.font-semibold").text(),
+          media.title,
+        ),
+      });
+    }
   });
-  if (!match) throw new Error(`4KHDHub downloads not found: ${media.title}`);
-  return match;
+  if (!matches.length) throw new Error(`4KHDHub downloads not found: ${media.title}`);
+  return matches;
 }
 
 async function redirect4khdhub(
@@ -187,6 +221,7 @@ async function extractHubCloud(
   link: string,
   providerContext: ProviderContext,
   signal?: AbortSignal,
+  qualityLabelText?: string,
 ): Promise<Stream[]> {
   const { axios, cheerio, commonHeaders: headers } = providerContext;
   const response = await axios.get(link, { headers, signal });
@@ -208,21 +243,24 @@ async function extractHubCloud(
   const cloud = await axios.get(next, { headers, signal });
   const $$ = cheerio.load(String(cloud.data));
   const streams: Stream[] = [];
+  const withQuality = (server: string) =>
+    qualityLabelText ? `${server} (${qualityLabelText})` : server;
+  const quality = qualityLabelText?.match(/\b(360|480|720|1080|2160)p\b/i)?.[1];
   $$(".btn-success.btn-lg.h6,.btn-danger,.btn-secondary").each((_index, element) => {
     const href = $$(element).attr("href") || "";
     if (!href) return;
     if (href.includes("pixeldrain")) {
-      streams.push({ server: "Pixeldrain", link: href, type: "mkv" });
+      streams.push({ server: withQuality("Pixeldrain"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     } else if (href.includes("cloudflarestorage")) {
-      streams.push({ server: "CF Storage", link: href, type: "mkv" });
+      streams.push({ server: withQuality("CF Storage"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     } else if (href.includes("fastdl") || href.includes("fsl.")) {
-      streams.push({ server: "FastDl", link: href, type: "mkv" });
+      streams.push({ server: withQuality("FastDl"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     } else if (href.includes("hubcdn")) {
-      streams.push({ server: "HubCdn", link: href, type: "mkv" });
+      streams.push({ server: withQuality("HubCdn"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     } else if (href.includes("google") || href.includes("drive")) {
-      streams.push({ server: "GDrive (download only)", link: href, type: "mkv" });
+      streams.push({ server: withQuality("GDrive (download only)"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     } else if (href.includes(".mkv") || href.includes("?token=")) {
-      streams.push({ server: "CF Worker", link: href, type: "mkv" });
+      streams.push({ server: withQuality("CF Worker"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     }
   });
   return streams;
@@ -248,24 +286,48 @@ export const getStream = async function ({
 
     const media = await tmdbMedia(link, providerContext);
     const page = await find4khdhubPage(media, providerContext, signal);
-    const source = await findDownloadLink(page, media, providerContext, signal);
-    const resolved = await redirect4khdhub(source, providerContext, signal);
-    if (resolved.includes("hubcloud") || resolved.includes("/drive/")) {
-      return extractHubCloud(resolved, providerContext, signal);
-    }
+    const variants = await findDownloadLinks(page, media, providerContext, signal);
+    const results = await Promise.allSettled(
+      variants.map(async (variant) => {
+        const resolved = await redirect4khdhub(
+          variant.link,
+          providerContext,
+          signal,
+        );
+        if (resolved.includes("hubcloud") || resolved.includes("/drive/")) {
+          return extractHubCloud(resolved, providerContext, signal, variant.label);
+        }
 
-    const response = await providerContext.axios.get(resolved, {
-      headers: providerContext.commonHeaders,
-      signal,
-    });
-    const html = String(response.data);
-    const $ = providerContext.cheerio.load(html);
-    const hubLink =
-      $('h3:contains("1080p") a').attr("href") ||
-      html.match(/href="(https:\/\/hubcloud\.[^"]+\/drive\/[^"]+)"/)?.[1] ||
-      "";
-    if (!hubLink) throw new Error("4KHDHub did not return a HubCloud link");
-    return extractHubCloud(hubLink, providerContext, signal);
+        const response = await providerContext.axios.get(resolved, {
+          headers: providerContext.commonHeaders,
+          signal,
+        });
+        const html = String(response.data);
+        const $ = providerContext.cheerio.load(html);
+        const hubLink =
+          $('h3:contains("1080p") a').attr("href") ||
+          html.match(/href="(https:\/\/hubcloud\.[^"]+\/drive\/[^"]+)"/)?.[1] ||
+          "";
+        if (!hubLink) throw new Error("4KHDHub did not return a HubCloud link");
+        return extractHubCloud(hubLink, providerContext, signal, variant.label);
+      }),
+    );
+    const streams = results
+      .filter(
+        (result): result is PromiseFulfilledResult<Stream[]> =>
+          result.status === "fulfilled",
+      )
+      .flatMap((result) => result.value);
+    if (streams.length) {
+      return streams.filter(
+        (stream, index, all) =>
+          all.findIndex((candidate) => candidate.link === stream.link) === index,
+      );
+    }
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    throw failure?.reason || new Error("No 4KHDHub streams were resolved");
   } catch (error) {
     throwProviderError("TMDB/4KHDHub", "stream", error);
   }
