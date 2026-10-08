@@ -62,6 +62,17 @@ function normalizePixeldrainUrl(link: string, ...htmlSources: string[]): string 
   return resolved;
 }
 
+function workerServerName(link: string): string {
+  try {
+    const host = new URL(link).hostname
+      .replace(/\.workers\.dev$/i, "")
+      .split(".")[0];
+    return host ? `CF Worker [${host}]` : "CF Worker";
+  } catch {
+    return "CF Worker";
+  }
+}
+
 function decodeSource(value: string): { o?: string } | null {
   try {
     const first = decodeBase64(value);
@@ -295,11 +306,7 @@ async function extractHubCloud(
         type: "mkv",
         ...(quality ? { quality } : {}),
       });
-    } else if (
-      href.includes("hubcloud") ||
-      href.includes("/?id=") ||
-      href.includes("greenmotors")
-    ) {
+    } else if (href.includes("hubcloud") || href.includes("/?id=") || href.includes("greenmotors")) {
       let direct = href;
       try {
         const redirected = await axios.get(href, {
@@ -315,15 +322,20 @@ async function extractHubCloud(
       } catch {
         // Keep the redirect URL when the host does not expose Location.
       }
+      const server = direct.includes(".dev")
+        ? workerServerName(direct)
+        : direct.includes("google") || direct.includes("drive")
+          ? "GDrive (download only)"
+          : "CF Worker";
       streams.push({
-        server: withQuality("GDrive (download only)"),
+        server: withQuality(server),
         link: direct,
         type: "mkv",
         ...(quality ? { quality } : {}),
       });
     } else if (href.includes(".dev") && !href.includes("/?id=")) {
       streams.push({
-        server: withQuality("CF Worker"),
+        server: withQuality(workerServerName(href)),
         link: href,
         type: "mkv",
         ...(quality ? { quality } : {}),
@@ -337,7 +349,7 @@ async function extractHubCloud(
     } else if (href.includes("google") || href.includes("drive")) {
       streams.push({ server: withQuality("GDrive (download only)"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     } else if (href.includes(".mkv") || href.includes("?token=")) {
-      streams.push({ server: withQuality("CF Worker"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
+      streams.push({ server: withQuality(workerServerName(href)), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     }
   }
   return streams;

@@ -2,7 +2,7 @@
   {
     "display_name": "TMDB",
     "value": "tmdb",
-    "version": "1.6",
+    "version": "1.7",
     "icon": "https://raw.githubusercontent.com/thewahab07/vega-providers/main/assets/tmdb.png",
     "type": "global",
     "hasSettings": true,
