@@ -38,6 +38,30 @@ const rot13 = (value: string) =>
     );
   });
 
+function getPixeldrainRedirect(...htmlSources: string[]): string {
+  for (const html of htmlSources) {
+    const match = html.match(/var\s+pxl\s*=\s*['"]([^'"]+)['"];?/i);
+    if (match?.[1]) return match[1];
+  }
+  return "";
+}
+
+function normalizePixeldrainUrl(link: string, ...htmlSources: string[]): string {
+  let resolved = getPixeldrainRedirect(...htmlSources) || link;
+  if (resolved.includes("/api/")) return resolved;
+
+  try {
+    const url = new URL(resolved);
+    const token = url.pathname.split("/").filter(Boolean).pop();
+    if (token && /pixeldrain\./i.test(url.hostname)) {
+      return `${url.origin}/api/file/${token}?download`;
+    }
+  } catch {
+    // Return the original URL when Pixeldrain sends an unusual URL format.
+  }
+  return resolved;
+}
+
 function decodeSource(value: string): { o?: string } | null {
   try {
     const first = decodeBase64(value);
@@ -264,7 +288,12 @@ async function extractHubCloud(
     const href = $$(element).attr("href") || "";
     if (!href) return;
     if (href.includes("pixeldrain")) {
-      streams.push({ server: withQuality("Pixeldrain"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
+      streams.push({
+        server: withQuality("Pixeldrain"),
+        link: normalizePixeldrainUrl(href, html, String(cloud.data)),
+        type: "mkv",
+        ...(quality ? { quality } : {}),
+      });
     } else if (href.includes("cloudflarestorage")) {
       streams.push({ server: withQuality("CF Storage"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
     } else if (href.includes("fastdl") || href.includes("fsl.")) {
