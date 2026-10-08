@@ -2,7 +2,8 @@
 
 A [Vega App](https://github.com/vega-org/vega-app) provider that browses everything on
 [TMDB](https://www.themoviedb.org): movies, TV shows, anime, seasons and episodes.
-It is **metadata only** – `getStream` always returns an empty list.
+Catalogs and metadata come from TMDB; playback links are resolved through
+[4KHDHub](https://4khdhub.one) and its HubCloud servers.
 
 ## What you get
 
@@ -12,6 +13,7 @@ It is **metadata only** – `getStream` always returns an empty list.
 - **Search:** movies, TV and anime in one search (people are filtered out)
 - **Details:** backdrop, poster, logo, synopsis, rating, cast, genres, year/runtime, trailer, IMDb + TMDB ids
 - **Seasons & episodes:** every season (incl. Specials) with episode titles, descriptions and stills
+- **Playback:** TMDB movie/show IDs are matched to 4KHDHub pages and resolved to HubCloud streams
 - **Skip intro / recap / credits:** timestamps from [TheIntroDB](https://theintrodb.org) (matched by TMDB id) are attached to every aired episode and to movies, so the app's skip button works. Coverage is community-sourced, so some titles have none.
 
 ## Setup
@@ -44,7 +46,7 @@ providers/tmdb/
   meta.ts       getMeta   (links look like "movie/603" or "tv/1399")
   episodes.ts   getEpisodes (url looks like "tv/1399/season/1")
   skips.ts      TheIntroDB lookups (intro / recap / credits timestamps)
-  stream.ts     returns []
+  stream.ts     resolves TMDB links through 4KHDHub / HubCloud
   settings.ts   settings UI
 ```
 
