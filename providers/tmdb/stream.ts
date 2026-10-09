@@ -33,9 +33,7 @@ const decodeBase64 = (value: string): string | null => {
 const rot13 = (value: string) =>
   value.replace(/[a-z]/gi, (char) => {
     const base = char <= "Z" ? 65 : 97;
-    return String.fromCharCode(
-      ((char.charCodeAt(0) - base + 13) % 26) + base,
-    );
+    return String.fromCharCode(((char.charCodeAt(0) - base + 13) % 26) + base);
   });
 
 function getPixeldrainRedirect(...htmlSources: string[]): string {
@@ -46,7 +44,10 @@ function getPixeldrainRedirect(...htmlSources: string[]): string {
   return "";
 }
 
-function normalizePixeldrainUrl(link: string, ...htmlSources: string[]): string {
+function normalizePixeldrainUrl(
+  link: string,
+  ...htmlSources: string[]
+): string {
   let resolved = getPixeldrainRedirect(...htmlSources) || link;
   if (resolved.includes("/api/")) return resolved;
 
@@ -98,7 +99,8 @@ async function tmdbMedia(
   const type = movie ? "movie" : "tv";
   const id = (movie || episode || show)![1];
   const data = await tmdbGet<any>(providerContext, `/${type}/${id}`, {});
-  const title = data.title || data.name || data.original_title || data.original_name;
+  const title =
+    data.title || data.name || data.original_title || data.original_name;
   const releaseDate = data.release_date || data.first_air_date || "";
   if (!title) throw new Error(`TMDB title missing for ${link}`);
 
@@ -140,7 +142,8 @@ async function find4khdhubPage(
     }
   });
 
-  if (!exact && !fallback) throw new Error(`4KHDHub title not found: ${media.title}`);
+  if (!exact && !fallback)
+    throw new Error(`4KHDHub title not found: ${media.title}`);
   return exact || fallback;
 }
 
@@ -184,7 +187,8 @@ async function findDownloadLinks(
           .map((_index, anchor) => {
             const href = $(anchor).attr("href") || "";
             const text = $(anchor).text().toLowerCase();
-            return href && (text.includes("hubcloud") || text.includes("hubdrive"))
+            return href &&
+              (text.includes("hubcloud") || text.includes("hubdrive"))
               ? href
               : "";
           })
@@ -198,7 +202,8 @@ async function findDownloadLinks(
         }
       }
     });
-    if (!matches.length) throw new Error(`4KHDHub episode not found: ${wanted}`);
+    if (!matches.length)
+      throw new Error(`4KHDHub episode not found: ${wanted}`);
     return matches;
   }
 
@@ -225,7 +230,8 @@ async function findDownloadLinks(
       });
     }
   });
-  if (!matches.length) throw new Error(`4KHDHub downloads not found: ${media.title}`);
+  if (!matches.length)
+    throw new Error(`4KHDHub downloads not found: ${media.title}`);
   return matches;
 }
 
@@ -256,14 +262,134 @@ async function redirect4khdhub(
   const token = btoa(String(data.data || ""));
   const blogLink = `${data.wp_http1}?re=${token}`;
   const waitMs = (Number(data.total_time) + 3) * 1000;
-  if (waitMs > 0) await new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, waitMs);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timer);
-      reject(new Error("Aborted"));
-    }, { once: true });
-  });
+  if (waitMs > 0)
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, waitMs);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new Error("Aborted"));
+        },
+        { once: true },
+      );
+    });
   return blogLink;
+}
+
+function extractHubCloudUrl(html: string, $: any): string {
+  const doubleAtob = html.match(
+    /(?:var|let|const)\s+\w+\s*=\s*atob\(atob\(['"]([^'"]+)['"]\)\)/,
+  )?.[1];
+  if (doubleAtob) {
+    try {
+      return atob(atob(doubleAtob));
+    } catch {
+      // Fall through to the other strategies.
+    }
+  }
+  const plain = html.match(/var\s+url\s*=\s*['"]([^'"]+)['"]/)?.[1];
+  if (plain) {
+    const encoded = plain.split("r=")[1];
+    const decoded = encoded ? decodeBase64(encoded) : null;
+    if (decoded) return decoded;
+    return plain;
+  }
+  return $(".fa-file-download.fa-lg").parent().attr("href") || "";
+}
+
+// GET a page; when a Cloudflare challenge answers 403, solve it through the
+// app's web view (when available) and retry once.
+async function getWithWaf(
+  url: string,
+  providerContext: ProviderContext,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { axios, openWebView, commonHeaders } = providerContext;
+  const headers: Record<string, string> = { ...commonHeaders };
+  try {
+    return String((await axios.get(url, { headers, signal })).data);
+  } catch (error: any) {
+    if (error?.response?.status !== 403 || !openWebView) throw error;
+    const origin = url.split("/").slice(0, 3).join("/");
+    const solved = await openWebView(origin, {
+      title: "Solve the captcha below and click done",
+      description: "Required to bypass anti-bot protection.",
+      headers: { ...headers, Referer: origin },
+      waitForCookie: "cf_clearance",
+      force: true,
+    });
+    if (solved?.userAgent) headers["User-Agent"] = solved.userAgent;
+    if (solved?.cookies) {
+      headers["Cookie"] = headers["Cookie"]
+        ? `${headers["Cookie"]}; ${solved.cookies}`
+        : solved.cookies;
+    }
+    return String((await axios.get(url, { headers, signal })).data);
+  }
+}
+
+// HubCloud buttons point at an intermediate page that redirects (sometimes
+// twice) to the real file URL. Follow the whole chain, like the upstream
+// hubcloud extractor does, instead of stopping after the first hop.
+async function resolveHubCloudRedirect(
+  href: string,
+  providerContext: ProviderContext,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { axios, commonHeaders: headers } = providerContext;
+  const stripLink = (value: string) =>
+    value.includes("?link=") ? value.split("?link=")[1] || value : value;
+  const absoluteUrl = (location: string, base: string) => {
+    try {
+      return new URL(location, base).href;
+    } catch {
+      return location;
+    }
+  };
+  let current = href;
+
+  // 1. Let fetch follow every redirect (works in the app's web worker).
+  try {
+    if (typeof fetch !== "undefined") {
+      const res = await fetch(href, { headers, signal, redirect: "follow" });
+      const finalUrl = res.url;
+      try {
+        await res.body?.cancel();
+      } catch {
+        // The body is not needed, only the final URL.
+      }
+      if (finalUrl && finalUrl.includes("googleusercontent")) {
+        return stripLink(finalUrl);
+      }
+      if (finalUrl && finalUrl !== href) current = finalUrl;
+    }
+  } catch {
+    // Fall back to manual hops below.
+  }
+
+  // 2. Manual hops (Node / environments where fetch can't expose the URL).
+  if (!current.includes("googleusercontent")) {
+    try {
+      const noFollow = {
+        headers,
+        signal,
+        maxRedirects: 0,
+        validateStatus: (status: number) => status >= 200 && status < 400,
+      };
+      const first = await axios.get(current, noFollow);
+      const location1 = first.headers?.location;
+      if (location1) current = absoluteUrl(location1, current);
+      if (!current.includes("googleusercontent") && current.includes("http")) {
+        const second = await axios.get(current, noFollow);
+        const location2 = second.headers?.location;
+        if (location2) current = absoluteUrl(location2, current);
+      }
+    } catch {
+      // Keep the best URL found so far.
+    }
+  }
+  return stripLink(current);
 }
 
 async function extractHubCloud(
@@ -272,30 +398,24 @@ async function extractHubCloud(
   signal?: AbortSignal,
   qualityLabelText?: string,
 ): Promise<Stream[]> {
-  const { axios, cheerio, commonHeaders: headers } = providerContext;
-  const response = await axios.get(link, { headers, signal });
-  const html = String(response.data);
+  const { cheerio } = providerContext;
+  const html = await getWithWaf(link, providerContext, signal);
   const $ = cheerio.load(html);
-  let next =
-    html.match(/(?:var|let|const)\s+\w+\s*=\s*atob\(atob\(['"]([^'"]+)['"]\)\)/)?.[1] ||
-    $(".fa-file-download.fa-lg").parent().attr("href") ||
-    "";
-  if (next) {
-    try {
-      next = atob(atob(next));
-    } catch {
-      // Keep the original link when the page uses a non-base64 redirect.
-    }
-  }
+  let next = extractHubCloudUrl(html, $);
+  if (next.startsWith("/"))
+    next = `${link.split("/").slice(0, 3).join("/")}${next}`;
   if (!next || next === link) return [];
 
-  const cloud = await axios.get(next, { headers, signal });
+  const cloudHtml = await getWithWaf(next, providerContext, signal);
+  const cloud = { data: cloudHtml };
   const $$ = cheerio.load(String(cloud.data));
   const streams: Stream[] = [];
   const withQuality = (server: string) =>
     qualityLabelText ? `${server} (${qualityLabelText})` : server;
   const quality = qualityLabelText?.match(/\b(360|480|720|1080|2160)p\b/i)?.[1];
-  const linkElements = $$(".btn-success.btn-lg.h6,.btn-danger,.btn-secondary").toArray();
+  const linkElements = $$(
+    ".btn-success.btn-lg.h6,.btn-danger,.btn-secondary",
+  ).toArray();
   for (const element of linkElements) {
     const href = $$(element).attr("href") || "";
     if (!href) continue;
@@ -306,22 +426,16 @@ async function extractHubCloud(
         type: "mkv",
         ...(quality ? { quality } : {}),
       });
-    } else if (href.includes("hubcloud") || href.includes("/?id=") || href.includes("greenmotors")) {
-      let direct = href;
-      try {
-        const redirected = await axios.get(href, {
-          headers,
-          signal,
-          maxRedirects: 0,
-          validateStatus: (status: number) => status >= 200 && status < 400,
-        });
-        direct = redirected.headers?.location || direct;
-        if (direct.includes("?link=")) {
-          direct = direct.split("?link=")[1] || direct;
-        }
-      } catch {
-        // Keep the redirect URL when the host does not expose Location.
-      }
+    } else if (
+      href.includes("hubcloud") ||
+      href.includes("/?id=") ||
+      href.includes("greenmotors")
+    ) {
+      const direct = await resolveHubCloudRedirect(
+        href,
+        providerContext,
+        signal,
+      );
       const server = direct.includes(".dev")
         ? workerServerName(direct)
         : direct.includes("google") || direct.includes("drive")
@@ -341,15 +455,40 @@ async function extractHubCloud(
         ...(quality ? { quality } : {}),
       });
     } else if (href.includes("cloudflarestorage")) {
-      streams.push({ server: withQuality("CF Storage"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
+      streams.push({
+        server: withQuality("CF Storage"),
+        link: href,
+        type: "mkv",
+        ...(quality ? { quality } : {}),
+      });
     } else if (href.includes("fastdl") || href.includes("fsl.")) {
-      streams.push({ server: withQuality("FastDl"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
+      streams.push({
+        server: withQuality("FastDl"),
+        link: href,
+        type: "mkv",
+        ...(quality ? { quality } : {}),
+      });
     } else if (href.includes("hubcdn")) {
-      streams.push({ server: withQuality("HubCdn"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
+      streams.push({
+        server: withQuality("HubCdn"),
+        link: href,
+        type: "mkv",
+        ...(quality ? { quality } : {}),
+      });
     } else if (href.includes("google") || href.includes("drive")) {
-      streams.push({ server: withQuality("GDrive (download only)"), link: href, type: "mkv", ...(quality ? { quality } : {}) });
+      streams.push({
+        server: withQuality("GDrive (download only)"),
+        link: href,
+        type: "mkv",
+        ...(quality ? { quality } : {}),
+      });
     } else if (href.includes(".mkv") || href.includes("?token=")) {
-      streams.push({ server: withQuality(workerServerName(href)), link: href, type: "mkv", ...(quality ? { quality } : {}) });
+      streams.push({
+        server: withQuality(workerServerName(href)),
+        link: href,
+        type: "mkv",
+        ...(quality ? { quality } : {}),
+      });
     }
   }
   return streams;
@@ -375,7 +514,12 @@ export const getStream = async function ({
 
     const media = await tmdbMedia(link, providerContext);
     const page = await find4khdhubPage(media, providerContext, signal);
-    const variants = await findDownloadLinks(page, media, providerContext, signal);
+    const variants = await findDownloadLinks(
+      page,
+      media,
+      providerContext,
+      signal,
+    );
     const results = await Promise.allSettled(
       variants.map(async (variant) => {
         let lastError: unknown;
@@ -405,9 +549,12 @@ export const getStream = async function ({
             const $ = providerContext.cheerio.load(html);
             const hubLink =
               $('h3:contains("1080p") a').attr("href") ||
-              html.match(/href="(https:\/\/hubcloud\.[^"]+\/drive\/[^"]+)"/)?.[1] ||
+              html.match(
+                /href="(https:\/\/hubcloud\.[^"]+\/drive\/[^"]+)"/,
+              )?.[1] ||
               "";
-            if (!hubLink) throw new Error("4KHDHub did not return a HubCloud link");
+            if (!hubLink)
+              throw new Error("4KHDHub did not return a HubCloud link");
             const streams = await extractHubCloud(
               hubLink,
               providerContext,
