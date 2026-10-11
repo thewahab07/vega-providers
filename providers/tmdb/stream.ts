@@ -13,6 +13,7 @@ type Media = {
 type DownloadVariant = {
   links: string[];
   label: string;
+  size?: string;
 };
 
 const cleanTitle = (value: string) =>
@@ -61,6 +62,23 @@ function normalizePixeldrainUrl(
     // Return the original URL when Pixeldrain sends an unusual URL format.
   }
   return resolved;
+}
+
+const SIZE_PATTERN = /(\d+(?:[.,]\d+)?)\s*(TB|GB|MB|KB)\b/i;
+
+// "2.1gb" / "750 MB" -> "2.1 GB" / "750 MB"
+function parseSize(text: string): string | undefined {
+  const match = text.match(SIZE_PATTERN);
+  if (!match) return undefined;
+  return `${match[1].replace(",", ".")} ${match[2].toUpperCase()}`;
+}
+
+function stripSize(text: string): string {
+  return text
+    .replace(new RegExp(SIZE_PATTERN.source, "gi"), "")
+    .replace(/\[\s*\]|\(\s*\)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function workerServerName(link: string): string {
@@ -198,6 +216,7 @@ async function findDownloadLinks(
           matches.push({
             links,
             label: qualityLabel(groupTitle, media.title),
+            size: parseSize($(element).text()),
           });
         }
       }
@@ -227,6 +246,7 @@ async function findDownloadLinks(
           $(element).find(".flex-1.text-left.font-semibold").text(),
           media.title,
         ),
+        size: parseSize($(element).text()),
       });
     }
   });
@@ -397,6 +417,7 @@ async function extractHubCloud(
   providerContext: ProviderContext,
   signal?: AbortSignal,
   qualityLabelText?: string,
+  sizeText?: string,
 ): Promise<Stream[]> {
   const { cheerio } = providerContext;
   const html = await getWithWaf(link, providerContext, signal);
@@ -410,8 +431,24 @@ async function extractHubCloud(
   const cloud = { data: cloudHtml };
   const $$ = cheerio.load(String(cloud.data));
   const streams: Stream[] = [];
+  // Prefer the size from the 4KHDHub listing; fall back to the HubCloud page.
+  const size =
+    sizeText ||
+    parseSize(
+      $.root()
+        .text()
+        .match(/File\s*Size\s*[:\-]?\s*[\d.,]+\s*[KMGT]B/i)?.[0] || "",
+    ) ||
+    parseSize(
+      $$.root()
+        .text()
+        .match(/(?:File\s*)?Size\s*[:\-]?\s*[\d.,]+\s*[KMGT]B/i)?.[0] || "",
+    );
+  const info = [qualityLabelText ? stripSize(qualityLabelText) : "", size]
+    .filter(Boolean)
+    .join(" • ");
   const withQuality = (server: string) =>
-    qualityLabelText ? `${server} (${qualityLabelText})` : server;
+    info ? `${server} (${info})` : server;
   const quality = qualityLabelText?.match(/\b(360|480|720|1080|2160)p\b/i)?.[1];
   const linkElements = $$(
     ".btn-success.btn-lg.h6,.btn-danger,.btn-secondary",
@@ -536,6 +573,7 @@ export const getStream = async function ({
                 providerContext,
                 signal,
                 variant.label,
+                variant.size,
               );
               if (streams.length) return streams;
               throw new Error("HubCloud returned no streams");
@@ -560,6 +598,7 @@ export const getStream = async function ({
               providerContext,
               signal,
               variant.label,
+              variant.size,
             );
             if (streams.length) return streams;
             throw new Error("HubCloud returned no streams");
