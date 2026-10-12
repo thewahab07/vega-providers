@@ -444,11 +444,11 @@ async function extractHubCloud(
         .text()
         .match(/(?:File\s*)?Size\s*[:\-]?\s*[\d.,]+\s*[KMGT]B/i)?.[0] || "",
     );
-  const info = [qualityLabelText ? stripSize(qualityLabelText) : "", size]
-    .filter(Boolean)
-    .join(" • ");
-  const withQuality = (server: string) =>
-    info ? `${server} (${info})` : server;
+  const label = qualityLabelText ? stripSize(qualityLabelText) : "";
+  const withQuality = (server: string) => {
+    const named = label ? `${server} (${label})` : server;
+    return size ? `${size} • ${named}` : named;
+  };
   const quality = qualityLabelText?.match(/\b(360|480|720|1080|2160)p\b/i)?.[1];
   const linkElements = $$(
     ".btn-success.btn-lg.h6,.btn-danger,.btn-secondary",
