@@ -5,6 +5,8 @@ import { tmdbGet } from "./api";
 
 type Media = {
   title: string;
+  originalTitle?: string;
+  isTv?: boolean;
   year?: string;
   season?: number;
   episode?: number;
@@ -64,7 +66,7 @@ function normalizePixeldrainUrl(
   return resolved;
 }
 
-const SIZE_PATTERN = /(\d+(?:[.,]\d+)?)\s*(TB|GB|MB|KB)\b/i;
+const SIZE_PATTERN = /(\d+(?:[.,]\d+)?)\s*(TB|GB|MB|KB)/i;
 
 // "2.1gb" / "750 MB" -> "2.1 GB" / "750 MB"
 function parseSize(text: string): string | undefined {
@@ -124,11 +126,91 @@ async function tmdbMedia(
 
   return {
     title,
+    originalTitle: data.original_title || data.original_name || undefined,
+    isTv: type === "tv",
     year: releaseDate.slice(0, 4),
     ...(episode
       ? { season: Number(episode[2]), episode: Number(episode[3]) }
       : {}),
   };
+}
+
+const COLLECTION_PATTERN =
+  /\b(collection|trilogy|duology|quadrilogy|saga|anthology|franchise|box\s*set|vol(?:ume)?s?\.?\s*\d+\s*[-–&+]\s*\d+)\b/i;
+
+const STOP_WORDS = new Set(["the", "a", "an", "of", "and", "part"]);
+
+const titleTokens = (value: string) =>
+  cleanTitle(value.replace(/&/g, " and "))
+    .split(" ")
+    .filter((token) => token && !STOP_WORDS.has(token));
+
+// Cards look like: <title> <year> • <season tag> <quality / genre labels>.
+// The site does NOT put the year inside the title, and the URL tells a series
+// ("...-series-149") from a movie ("...-movie-3546").
+type Candidate = { href: string; title: string; year?: number; isTv?: boolean };
+
+// 0 = reject. Higher is better. Title match is the main signal; type and year
+// separate remakes / sequels / same-named titles from the right one.
+function scoreCandidate(candidate: Candidate, media: Media): number {
+  const wantedTokens = [media.title, media.originalTitle]
+    .filter((name): name is string => !!name)
+    .map(titleTokens);
+  const cleanedTitle = candidate.title
+    .replace(/[\[(].*?[\])]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const have = titleTokens(cleanedTitle);
+  if (!have.length) return 0;
+
+  // A film must not be matched to a series page, or the other way round.
+  if (candidate.isTv !== undefined && candidate.isTv !== !!media.isTv) return 0;
+  if (!media.isTv && COLLECTION_PATTERN.test(candidate.title)) return 0;
+
+  // 2 = same title, 1 = related title. The site often adds a franchise tag
+  // ("Guardians of the Galaxy Marvel Phase 2"), so a title that contains all
+  // the wanted words (or the reverse) counts, but only if the year then
+  // confirms it is the same film.
+  let titleScore = 0;
+  let extraWords = 0;
+  for (const want of wantedTokens) {
+    if (!want.length) continue;
+    if (want.join(" ") === have.join(" ")) {
+      titleScore = 2;
+      extraWords = 0;
+      break;
+    }
+    const wantInHave = want.every((token) => have.includes(token));
+    const haveInWant = have.every((token) => want.includes(token));
+    const shared = want.filter((token) => have.includes(token)).length;
+    if (
+      wantInHave ||
+      haveInWant ||
+      shared / Math.max(want.length, have.length) >= 0.6
+    ) {
+      if (titleScore < 1) {
+        titleScore = 1;
+        extraWords = Math.abs(have.length - want.length);
+      }
+    }
+  }
+  if (!titleScore) return 0;
+
+  const wantedYear = Number(media.year);
+  let yearScore = 1; // site shows no year: unknown
+  if (wantedYear && candidate.year) {
+    const diff = Math.abs(candidate.year - wantedYear);
+    if (diff === 0) yearScore = 3;
+    else if (diff === 1) yearScore = 2;
+    // A different year is a different film (sequel / remake). For series the
+    // card shows the first year, which can differ from TMDB's air date, but
+    // only an exact title match is trusted then.
+    else if (media.isTv && titleScore === 2) yearScore = 1;
+    else return 0;
+  }
+  // A merely related title must be confirmed by the year.
+  if (titleScore < 2 && yearScore < 2) return 0;
+  return titleScore * 10 + yearScore + 1 / (1 + extraWords);
 }
 
 async function find4khdhubPage(
@@ -137,32 +219,55 @@ async function find4khdhubPage(
   signal?: AbortSignal,
 ): Promise<string> {
   const baseUrl = await getBaseUrl("4khdhub");
-  const query = encodeURIComponent(media.title);
-  const response = await providerContext.axios.get(`${baseUrl}/?s=${query}`, {
-    headers: providerContext.commonHeaders,
-    signal,
-  });
-  const $ = providerContext.cheerio.load(response.data);
-  const candidates = $(".card-grid").children("a.movie-card");
-  let fallback = "";
-  let exact = "";
+  const queries = [
+    media.title,
+    media.title.split(/\s*[:–-]\s+/)[0],
+    media.originalTitle,
+  ].filter(
+    (query, index, all): query is string =>
+      !!query && all.indexOf(query) === index,
+  );
 
-  candidates.each((_index, element) => {
-    const href = $(element).attr("href");
-    const resultTitle = $(element).find(".movie-card-title").text().trim();
-    if (!href || !resultTitle) return;
-    const result = cleanTitle(resultTitle);
-    const wanted = cleanTitle(media.title);
-    const yearMatches = !media.year || result.includes(media.year);
-    if (!fallback) fallback = new URL(href, `${baseUrl}/`).href;
-    if (result.includes(wanted) && yearMatches && !exact) {
-      exact = new URL(href, `${baseUrl}/`).href;
-    }
-  });
+  for (const query of queries) {
+    const response = await providerContext.axios.get(
+      `${baseUrl}/?s=${encodeURIComponent(query)}`,
+      { headers: providerContext.commonHeaders, signal },
+    );
+    const $ = providerContext.cheerio.load(response.data);
+    let best = "";
+    let bestScore = 0;
+    $(".card-grid")
+      .children("a.movie-card")
+      .each((_index, element) => {
+        const href = $(element).attr("href");
+        const title = $(element)
+          .find(".movie-card-title")
+          .text()
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!href || !title) return;
+        const rest = $(element).text().replace(/\s+/g, " ").replace(title, " ");
+        const year = Number(rest.match(/\b(?:19|20)\d{2}\b/)?.[0]) || undefined;
+        const kind = href.match(/-(series|movie)-\d+\/?(?:[?#].*)?$/i)?.[1];
+        const score = scoreCandidate(
+          {
+            href,
+            title,
+            year,
+            isTv: kind ? kind.toLowerCase() === "series" : undefined,
+          },
+          media,
+        );
+        if (score > bestScore) {
+          bestScore = score;
+          best = new URL(href, `${baseUrl}/`).href;
+        }
+      });
+    if (best) return best;
+  }
 
-  if (!exact && !fallback)
-    throw new Error(`4KHDHub title not found: ${media.title}`);
-  return exact || fallback;
+  // No guessing: the first search result is often a different title.
+  throw new Error(`4KHDHub title not found: ${media.title}`);
 }
 
 function qualityLabel(raw: string, mediaTitle: string): string {
@@ -193,10 +298,26 @@ async function findDownloadLinks(
     const wanted = `S${String(media.season).padStart(2, "0")}E${String(
       media.episode,
     ).padStart(2, "0")}`;
+    const wantedPattern = new RegExp(`(?<![A-Z0-9])${wanted}(?!\\d)`);
     const matches: DownloadVariant[] = [];
-    $(".episode-download-item").each((_index, element) => {
+    // The page also holds OAD / "Final Season" files named S01Exx inside other
+    // season groups, so only read files from the requested season's group.
+    const groupSeason = (element: any): number | undefined => {
+      const group = $(element).closest(".season-item");
+      if (!group.length) return undefined;
+      const header = group.clone();
+      header.find(".episode-download-item").remove();
+      const text = header.text().replace(/\s+/g, " ");
+      const found = text.match(/\bS(?:eason)?\s*0*(\d{1,2})\b/i)?.[1];
+      return found ? Number(found) : undefined;
+    };
+    const items = $(".episode-download-item").toArray();
+    const seasonKnown = items.some((item) => groupSeason(item) !== undefined);
+    $(items).each((_index, element) => {
       const title = $(element).find(".episode-file-title").text().toUpperCase();
-      if (title.includes(wanted)) {
+      const season = groupSeason(element);
+      if (seasonKnown && season !== media.season) return;
+      if (wantedPattern.test(title)) {
         const groupTitle =
           $(element).closest(".season-item").find(".episode-title").text() ||
           $(element).find(".episode-file-title").text();
@@ -263,7 +384,9 @@ async function redirect4khdhub(
   const { axios, commonHeaders: headers } = providerContext;
   const response = await axios.get(link, { headers, signal });
   const source = String(response.data);
-  const encrypted = source.split("s('o','")?.[1]?.split("',180")?.[0];
+  const encrypted =
+    source.match(/\bs\(\s*'o'\s*,\s*'([^']+)'/)?.[1] ||
+    source.split("s('o','")?.[1]?.split("',180")?.[0];
   const decoded = encrypted ? decodeSource(encrypted) : null;
   const target = decoded?.o ? decodeBase64(decoded.o) : null;
   if (!target) return link;
@@ -295,6 +418,95 @@ async function redirect4khdhub(
       );
     });
   return blogLink;
+}
+
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new Error("Aborted"));
+      },
+      { once: true },
+    );
+  });
+
+const HUB_LINK_PATTERN = /hubcloud|hubdrive|\/drive\//i;
+
+// The page behind the 4KHDHub redirect lists the HubCloud / HubDrive links.
+// Older posts (e.g. Guardians of the Galaxy 1 & 2) don't always use the
+// "<h3>1080p" layout, so try several strategies, best match first.
+async function findHubLinkOnPage(
+  pageUrl: string,
+  variant: DownloadVariant,
+  providerContext: ProviderContext,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { axios, cheerio, commonHeaders: headers } = providerContext;
+  let html = "";
+  for (let attempt = 0; attempt < 4; attempt++) {
+    html = String((await axios.get(pageUrl, { headers, signal })).data);
+    if (!/Invalid Request/i.test(html)) break;
+    await sleep(1500, signal);
+  }
+  const $ = cheerio.load(html);
+  const absolute = (href?: string) => {
+    if (!href) return "";
+    try {
+      return new URL(href, pageUrl).href;
+    } catch {
+      return "";
+    }
+  };
+
+  const quality = variant.label.match(/\b\d{3,4}p\b/i)?.[0] || "";
+  const candidates: string[] = [
+    html.match(/var\s+reurl\s*=\s*["']([^"']+)["']/)?.[1] || "",
+    quality ? $(`h3:contains("${quality}") a`).attr("href") || "" : "",
+    $('h3:contains("1080p") a').attr("href") || "",
+    ...$("a")
+      .toArray()
+      .map((anchor) => $(anchor).attr("href") || "")
+      .filter((href) => HUB_LINK_PATTERN.test(href)),
+    ...[...html.matchAll(/href=["']([^"']+)["']/g)]
+      .map((match) => match[1])
+      .filter((href) => HUB_LINK_PATTERN.test(href)),
+  ];
+  for (const candidate of candidates) {
+    const url = absolute(candidate);
+    if (url && url !== pageUrl) return url;
+  }
+  throw new Error(`4KHDHub page has no HubCloud/HubDrive link (${pageUrl})`);
+}
+
+// HubDrive pages hand over to HubCloud through a button and/or a meta refresh.
+async function hubDriveToHubCloud(
+  link: string,
+  providerContext: ProviderContext,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (!/hubdrive/i.test(link)) return link;
+  const { axios, cheerio, commonHeaders: headers } = providerContext;
+  const html = String((await axios.get(link, { headers, signal })).data);
+  const $ = cheerio.load(html);
+  const next =
+    $(".btn.btn-primary.btn-user.btn-success1.m-1").attr("href") ||
+    $("a")
+      .toArray()
+      .map((anchor) => $(anchor).attr("href") || "")
+      .find((href) => /hubcloud|\/drive\//i.test(href)) ||
+    link;
+  const refreshed = html.match(
+    /<meta[^>]+http-equiv=["']refresh["'][^>]+url=([^"'>\s]+)/i,
+  )?.[1];
+  const target = next !== link ? next : refreshed || link;
+  try {
+    return new URL(target, link).href;
+  } catch {
+    return target;
+  }
 }
 
 function extractHubCloudUrl(html: string, $: any): string {
@@ -356,8 +568,12 @@ async function resolveHubCloudRedirect(
   href: string,
   providerContext: ProviderContext,
   signal?: AbortSignal,
+  referer?: string,
 ): Promise<string> {
-  const { axios, commonHeaders: headers } = providerContext;
+  const { axios } = providerContext;
+  const headers = referer
+    ? { ...providerContext.commonHeaders, Referer: referer }
+    : providerContext.commonHeaders;
   const stripLink = (value: string) =>
     value.includes("?link=") ? value.split("?link=")[1] || value : value;
   const absoluteUrl = (location: string, base: string) => {
@@ -531,6 +747,60 @@ async function extractHubCloud(
   return streams;
 }
 
+// Some 4KHDHub pages (e.g. Guardians of the Galaxy) link straight to a
+// "greenmotors.club/?id=..." resolver instead of the encrypted redirect page.
+// That link redirects to the real file, so follow it and build the stream.
+async function resolveDirectIdLink(
+  source: string,
+  variant: DownloadVariant,
+  pageUrl: string,
+  providerContext: ProviderContext,
+  signal?: AbortSignal,
+): Promise<Stream[] | null> {
+  const direct = await resolveHubCloudRedirect(
+    source,
+    providerContext,
+    signal,
+    pageUrl,
+  );
+  if (!direct || direct === source) return null;
+
+  if (direct.includes("hubcloud") || direct.includes("/drive/")) {
+    return extractHubCloud(
+      direct,
+      providerContext,
+      signal,
+      variant.label,
+      variant.size,
+    );
+  }
+
+  // A bare site root means the resolver bounced us to its home page.
+  try {
+    const url = new URL(direct);
+    if (url.pathname === "/" && !url.search) return null;
+  } catch {
+    return null;
+  }
+
+  const server = direct.includes(".dev")
+    ? workerServerName(direct)
+    : direct.includes("google") || direct.includes("drive")
+      ? "GDrive (download only)"
+      : "CF Worker";
+  const label = variant.label ? stripSize(variant.label) : "";
+  const named = label ? `${server} (${label})` : server;
+  const quality = variant.label?.match(/\b(360|480|720|1080|2160)p\b/i)?.[1];
+  return [
+    {
+      server: variant.size ? `${variant.size} • ${named}` : named,
+      link: direct,
+      type: "mkv",
+      ...(quality ? { quality } : {}),
+    },
+  ];
+}
+
 export const getStream = async function ({
   link,
   type: _type,
@@ -562,6 +832,16 @@ export const getStream = async function ({
         let lastError: unknown;
         for (const source of variant.links) {
           try {
+            if (/\/\?id=/.test(source)) {
+              const streams = await resolveDirectIdLink(
+                source,
+                variant,
+                page,
+                providerContext,
+                signal,
+              );
+              if (streams?.length) return streams;
+            }
             const resolved = await redirect4khdhub(
               source,
               providerContext,
@@ -579,20 +859,17 @@ export const getStream = async function ({
               throw new Error("HubCloud returned no streams");
             }
 
-            const response = await providerContext.axios.get(resolved, {
-              headers: providerContext.commonHeaders,
+            const found = await findHubLinkOnPage(
+              resolved,
+              variant,
+              providerContext,
               signal,
-            });
-            const html = String(response.data);
-            const $ = providerContext.cheerio.load(html);
-            const hubLink =
-              $('h3:contains("1080p") a').attr("href") ||
-              html.match(
-                /href="(https:\/\/hubcloud\.[^"]+\/drive\/[^"]+)"/,
-              )?.[1] ||
-              "";
-            if (!hubLink)
-              throw new Error("4KHDHub did not return a HubCloud link");
+            );
+            const hubLink = await hubDriveToHubCloud(
+              found,
+              providerContext,
+              signal,
+            );
             const streams = await extractHubCloud(
               hubLink,
               providerContext,
@@ -625,10 +902,23 @@ export const getStream = async function ({
           ) === index,
       );
     }
-    const failure = results.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
+    const reasons = [
+      ...new Set(
+        results
+          .filter(
+            (result): result is PromiseRejectedResult =>
+              result.status === "rejected",
+          )
+          .map((result) =>
+            String(result.reason?.message || result.reason || "unknown error"),
+          ),
+      ),
+    ];
+    throw new Error(
+      reasons.length
+        ? `No streams for "${media.title}" (${page}): ${reasons.join(" | ")}`
+        : "No 4KHDHub streams were resolved",
     );
-    throw failure?.reason || new Error("No 4KHDHub streams were resolved");
   } catch (error) {
     throwProviderError("TMDB/4KHDHub", "stream", error);
   }
