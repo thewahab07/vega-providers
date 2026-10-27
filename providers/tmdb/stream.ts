@@ -747,60 +747,6 @@ async function extractHubCloud(
   return streams;
 }
 
-// Some 4KHDHub pages (e.g. Guardians of the Galaxy) link straight to a
-// "greenmotors.club/?id=..." resolver instead of the encrypted redirect page.
-// That link redirects to the real file, so follow it and build the stream.
-async function resolveDirectIdLink(
-  source: string,
-  variant: DownloadVariant,
-  pageUrl: string,
-  providerContext: ProviderContext,
-  signal?: AbortSignal,
-): Promise<Stream[] | null> {
-  const direct = await resolveHubCloudRedirect(
-    source,
-    providerContext,
-    signal,
-    pageUrl,
-  );
-  if (!direct || direct === source) return null;
-
-  if (direct.includes("hubcloud") || direct.includes("/drive/")) {
-    return extractHubCloud(
-      direct,
-      providerContext,
-      signal,
-      variant.label,
-      variant.size,
-    );
-  }
-
-  // A bare site root means the resolver bounced us to its home page.
-  try {
-    const url = new URL(direct);
-    if (url.pathname === "/" && !url.search) return null;
-  } catch {
-    return null;
-  }
-
-  const server = direct.includes(".dev")
-    ? workerServerName(direct)
-    : direct.includes("google") || direct.includes("drive")
-      ? "GDrive (download only)"
-      : "CF Worker";
-  const label = variant.label ? stripSize(variant.label) : "";
-  const named = label ? `${server} (${label})` : server;
-  const quality = variant.label?.match(/\b(360|480|720|1080|2160)p\b/i)?.[1];
-  return [
-    {
-      server: variant.size ? `${variant.size} • ${named}` : named,
-      link: direct,
-      type: "mkv",
-      ...(quality ? { quality } : {}),
-    },
-  ];
-}
-
 export const getStream = async function ({
   link,
   type: _type,
@@ -832,16 +778,6 @@ export const getStream = async function ({
         let lastError: unknown;
         for (const source of variant.links) {
           try {
-            if (/\/\?id=/.test(source)) {
-              const streams = await resolveDirectIdLink(
-                source,
-                variant,
-                page,
-                providerContext,
-                signal,
-              );
-              if (streams?.length) return streams;
-            }
             const resolved = await redirect4khdhub(
               source,
               providerContext,
